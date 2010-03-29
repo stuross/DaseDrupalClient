@@ -1,0 +1,668 @@
+<?php 
+include 'dase-client/DaseClient.php';
+
+function daseclient_menu(){
+	$items = array();
+	$items['admin/settings/dase/settings'] = array(
+		'title' => 'Dase Configuration',
+		'description' => 'Administer Dase settings',
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('daseclient_admin_settings'),
+		'access arguments' => array('administer daseclient')
+	);
+	$items['node/add/dase/search'] = array(
+		'title' => 'Dase Search',
+		'description' => 'Search Dase Collection',
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('daseclient_search_form'),
+		'access arguments' => array('administer daseclient')
+	);
+	$items['daseclient/search'] = array(
+		'title' => 'Dase Search',
+		'page callback' => 'daseclient_dase_search',
+		'access arguments' => array('administer daseclient'),
+		'type' => MENU_CALLBACK
+	);
+	return $items;
+}
+
+function daseclient_perm() {
+	return array('administer daseclient');
+} 
+
+function daseclient_search_form(){
+
+		$form['daseclient']['search'] = array(
+			'#type' => 'textfield',
+			'#title' => t('Search Term')
+		);
+
+		$collections = daseclient_getCollections();
+		$coll = array('' => 'All Collections');
+		foreach($collections as $collection){
+			$coll[$collection->ascii_id] = $collection->collection_name;
+		}
+		$form['daseclient']['collection'] = array(
+			'#type' => 'select',
+			'#title' => t('Collection'),
+			'#options' => $coll,
+		);
+
+		$form['daseclient']['search_button'] = array(
+			'#type' => 'button',
+			'#value' => t('Search')
+		);
+		$form['daseclient']['download_button'] = array(
+			'#type' => 'button',
+			'#value' => t('Download'),
+			'#validate' => array('daseclient_download_validate'),
+			'#submit' => array('daseclient_download_submit')
+		);
+		drupal_add_js(drupal_get_path('module','daseclient').'/daseclient.js');
+		drupal_add_css(drupal_get_path('module','daseclient').'/daseclient.css');
+	return system_settings_form($form);
+}
+
+function daseclient_getCollections(){
+	$DASE_URL = preg_replace('{/$}', '', variable_get('daseclient_url',''));
+	$DASE_USER = variable_get('daseclient_user',''); 
+	$DASE_PASS = variable_get('daseclient_pass','');
+	$client = new DaseClient('','json',$DASE_URL);
+	$client->setAuth($DASE_USER,$DASE_PASS);
+	return json_decode($client->getUserCollections());
+}
+
+function daseclient_dase_search(){
+	$DASE_URL = preg_replace('{/$}', '', variable_get('daseclient_url',''));
+	$DASE_USER = variable_get('daseclient_user',''); 
+	$DASE_PASS = variable_get('daseclient_pass','');
+	$term = $_GET['term'];
+	$col = $_GET['col'];
+	$coll = array();
+
+	if($col == ''){
+		$collections = daseclient_getCollections();
+		foreach($collections as $collection){
+			$coll[] = $collection->ascii_id;
+		}
+	}
+	else{
+		$coll[] = $col;	
+	}
+	$client = new DaseClient('','json',$DASE_URL);
+	$client->setAuth($DASE_USER,$DASE_PASS);
+
+	//clear any messages drupal might create
+	drupal_get_messages(null, true); 
+
+	
+
+	header('Content-type: application/json');
+	echo $client->searchCollections($term,$coll);
+	exit;
+}
+	
+
+	function daseclient_download_validate(&$form, &$form_state){
+		$DASE_COLLECTION = variable_get('daseclient_collection_ascii_id','');
+		$DASE_URL = preg_replace('{/$}', '', variable_get('daseclient_url',''));
+		$DASE_USER = variable_get('daseclient_user',''); 
+		$DASE_PASS = variable_get('daseclient_pass','');
+		$account = $GLOBALS['user'];
+
+
+		foreach($_POST['daseclient']['image'] as $img){
+			$res = DaseClient::get(html_entity_decode($img['url']),$DASE_USER,$DASE_PASS);
+			$data = $res[1];
+			$headers = $res[0];
+			//////////////////////////////////////////////////
+			if ($headers['http_code'] != 200) {
+			    form_set_error('daseclient', t($data));
+				return false;
+			}
+
+			$tmpfile = file_create_filename(basename($img['url']), file_directory_temp());
+			$fp = fopen($tmpfile, 'w');
+			if (!$fp) {
+			    form_set_error('daseclient', t('could not open '.basename($img['url']).' for writing at '.file_directory_temp()));
+				return FALSE;
+			}
+			if (fwrite($fp, $data) && fclose($fp)) {
+
+				$title = $img['metadata']['title'];
+				if(!$title || $title == 'undefined'){
+					$title = $img['serial'];
+				}
+				$image = image_create_node_from($tmpfile, $title,l('Dase Link',$img['dase_url']));
+
+				$tmp_image = node_load($image->nid);
+				foreach($img['metadata'] as $key => $value){
+					$field_name = 'field_'.strtolower($key);
+					$meta_array = array();
+					if(is_array($value)){
+						foreach($value as $val){
+							$meta_array[] = array('value' => $val);
+						}
+					}
+					else{
+						$meta_array[] = array('value' => $value);
+					}
+					$tmp_image->$field_name = $meta_array;
+				}
+				node_save($tmp_image);
+
+			    if ($image && !form_get_errors()) {
+					drupal_set_message(t("Created new image. !image_link", array('!image_link' => l($title, 'node/'. $image->nid) )));
+				}
+			}
+			else{
+		    	form_set_error('daseclient', t('Invalid or missing image file.'));
+			}
+		}
+		foreach($_POST['daseclient']['audio'] as $mp3){
+			
+			$res = DaseClient::get(html_entity_decode($mp3['url']),$DASE_USER,$DASE_PASS);
+			$data = $res[1];
+			$headers = $res[0];
+			//////////////////////////////////////////////////
+			if ($headers['http_code'] != 200) {
+			    form_set_error('daseclient', t($data));
+				return false;
+			}
+			$tmpfile = file_create_filename(basename($mp3['url']), file_directory_path());
+			$fp = fopen($tmpfile, 'w');
+			if (!$fp) {
+			    form_set_error('daseclient', t('could not open '.file_directory_path().basename($mp3['url']).' for writing'));
+				return FALSE;
+			}
+			if (fwrite($fp, $data) && fclose($fp)) {
+			
+				$title = $mp3['metadata']['title'];
+				if(!$title || $title == 'undefined'){
+					$title = $mp3['serial'];
+				}
+
+				$node = new stdClass();
+				$node->title = $title;
+				$node->type = 'audio';
+				$node->created = time();
+				$node->changed = $node->created;
+				$node->status = 1;
+				$node->promote = 0;
+				$node->sticky = 0;
+				$node->format = 1;
+				$node->uid = $account->uid;
+				$node->language = 'en';
+				foreach($mp3['metadata'] as $key => $value){
+					$field_name = 'field_'.$key;
+					$meta_array = array();
+					foreach($value as $val){
+						$meta_array[] = array('value' => $val);
+					}
+					$node->$field_name = $meta_array;
+				}
+
+				node_save($node);
+
+				$audio = array(
+							'uid' => $account->uid,
+							'nid' => $node->nid,
+							'filename' => basename($tmpfile),
+							'filepath' => $tmpfile,
+							'filemime' => 'audio/mpeg',
+							'filesize' => filesize($tmpfile),
+							'status' => 1,
+							'timestamp' => time()			
+				);
+				drupal_write_record('files',$audio);
+
+				$node->field_audio = array($audio);
+				node_save($node);
+				drupal_set_message(t("Created new audio. !image_link", array('!image_link' => l($title, 'node/'. $node->nid) )));
+			}
+		}
+
+
+
+
+	}
+
+
+function daseclient_admin_settings() {
+	$form['daseclient_url'] = array(
+		'#type' => 'textfield', '#title' => t('Dase Url'), '#size' => 80,
+		'#default_value' => variable_get('daseclient_url', 'http://dasebeta.laits.utexas.edu/'),
+		'#description' => t('The URL path to Dase precedded by either http:// or https://')
+	);
+	$form['daseclient_collection_ascii_id'] = array(
+		'#type' => 'textfield', '#title' => t('Default Dase Collection'), '#size' => 80, '#maxlength' => 255,
+		'#default_value' => variable_get('daseclient_collection_ascii_id', ''),
+		'#description' => t('This is the ascii id representation of the Dase collection')
+	);
+	$form['daseclient_user'] = array(
+		'#type' => 'textfield', '#title' => t('Dase User Name'), '#size' => 80, '#maxlength' => 255,
+		'#default_value' => variable_get('daseclient_user', ''),
+		'#description' => t('Dase User Name (UTeid)')
+	);
+	$form['daseclient_pass'] = array(
+		'#type' => 'password', '#title' => t('Dase password'), '#size' => 80, '#maxlength' => 255,
+		'#default_value' => variable_get('daseclient_pass', ''),
+		'#description' => t('Dase HTTP password')
+	);
+	/*
+	$form['daseclient_content_type'] = array(
+		'#type' => 'fieldset',
+		'#title' => t('Content Type'),
+	);
+
+	$form['daseclient_content_type']['daseclient_content_type_name'] = array(
+		'#type' => 'select', 
+		'#title' => 'Content Type Name',
+		'#options' => array_merge(array(''), node_get_types('names')),
+		'#default_value' => variable_get('daseclient_content_type_name',''),
+		'#description' => t('This value should be the name of the content type to upload to Dase. Once saved a list of fields will appear below.')
+	);
+
+	$content_type = variable_get('daseclient_content_type_name','');
+
+	if($content_type){
+		$fields = content_fields(null,$content_type);
+		$options = array('title'=>'Title','body'=>'Body');
+
+		foreach($fields as $key => $val){
+			if($content_type == $val['type_name']){
+				$options[$key] = $val['widget']['label'];
+			}
+		}
+
+		$form['daseclient_content_type']['daseclient_content_type_fields'] = array(
+			'#type' => 'select', 
+			'#title' => 'Fields to upload to Dase',
+			'#options' => $options,
+			'#attributes' => array('style' => 'width:50%'),
+			'#default_value' => variable_get('daseclient_content_type_fields',''),
+			'#multiple' => true,
+			'#description' => t('Select the fields you want to send to dase upon upload. (to select multiple hold down mouse button and drag)')
+		);
+
+		$form['daseclient_content_type']['daseclient_content_type_save'] = array(
+			'#type' => 'checkbox', 
+			'#title' => 'Disable saving',
+			'#default_value' => variable_get('daseclient_content_type_save',''),
+			'#description' => t('Check to disable saving to drupal.')
+		);
+
+	}
+	else{
+		variable_set('daseclient_content_type_fields',array());
+	}
+	$form['daseclient_success_message'] = array(
+		'#type' => 'textarea', 
+		'#title' => 'Success Message',
+		'#default_value' => variable_get('daseclient_success_message',''),
+		'#description' => t('Message to display upon successful upload.')
+	);
+	 */
+	return system_settings_form($form);
+}
+
+
+
+
+
+
+
+//stolen from http://drupal.org/node/224235 post #60. had to keep it here so that I could use unique auth for dase. Drupal 7 will let you give auth headers.
+
+function daseclient_feedapi_mapper($op, $node, $feed_element = array(), $field_name = '', $sub_field = '') {
+	switch ($op) {
+	case 'describe':
+		return t('Maps image URLs to CCK ImageFields. The image will be downloaded and saved as a local file. You can choose whether to keep the original file name or use a hash value of the URL. The latter is better for images that are returned by scripts (like getimage.php?foo=), otherwise they would all be saved as "getimage.php".');
+
+	case 'list':
+		$sub_fields = array(
+			'original' => t('Original file name'),
+			'md5' => t('Hashed URL'),
+		);
+
+		$info = content_types($node->type);
+		$fields = array();
+		if (@count($info['fields'])) {
+			foreach ($info['fields'] as $field_name => $field) {
+				//drupal_set_message('<pre>'.htmlspecialchars(print_r($field, TRUE), ENT_QUOTES).'</pre>');
+				if ($field['type'] == 'filefield' && $field['widget']['type'] == 'imagefield_widget') {
+					$fields[$field_name] = $sub_fields;
+				}
+			}
+		}
+		//drupal_set_message('<pre>'.htmlspecialchars(print_r(array($fields), TRUE), ENT_QUOTES).'</pre>');
+		if (count($fields)) {
+			return $fields;
+		}
+		return FALSE;
+
+	case 'map':
+		//drupal_set_message('<pre>'.htmlspecialchars(print_r(array($node), TRUE), ENT_QUOTES).'</pre>');
+		// Here is where the actual mapping happens.
+		if (isset($node->{$field_name})) {
+			$items = $node->{$field_name};
+		}
+		else {
+			$items = array();
+		}
+		$field = content_fields($field_name);
+		foreach ((array)$feed_element as $element) {
+			//drupal_set_message('<pre>'.htmlspecialchars(print_r("element: $element", TRUE), ENT_QUOTES).'</pre>');
+			$url = NULL;
+			if (is_array($element)) {
+				// is this an options->enclosure-media->type array
+				if (valid_url($element['link'])) {
+					$url = $element['link'];
+				}
+				elseif (valid_url($element['player'])) {
+					$url = $element['player'];
+				}
+				elseif(valid_url($element[0])){
+					$url = $element[0];
+				}
+			}
+			elseif (is_string($element) && valid_url($element)) {
+				// straight link usually from options->original_url or options->guid
+				$url = $element;
+			}
+			//drupal_set_message('<pre>'.htmlspecialchars(print_r("url: $url", TRUE), ENT_QUOTES).'</pre>');
+			if ($url 
+				&& $file = _feedapi_mapper_imagefield_file_insert($node, $url, $sub_field, $field)) {
+					// Always add as last, Image Field takes care of deleting the
+					// first image for non-multiple fields. Has this been confirmed??
+					$items[] = $file;
+					// update the file status in the database
+					field_file_save($node, $file);
+					if (!$field['multiple']) {
+						break;
+					}
+				}
+		}
+		$node->$field_name = $items;
+		return $node;
+	}
+}
+
+
+function _feedapi_mapper_imagefield_file_insert($node, $url, $filename_option, $field) {
+	global $user;
+	static $blacklist;
+	static $users = array(); // user_load() cache
+
+	$dase_user = variable_get('daseclient_user',''); 
+	$dase_pass = variable_get('daseclient_pass','');
+
+	if (!isset($blacklist)) {
+		// The blacklist is an associative array consisting of an MD5 fingerprint
+		// and keyed by file size.
+		$blacklist = variable_get('imagefield_mapper_blacklist', array());
+	}
+	//use daseclient instead of drupal_http_request////////////////////
+	$res = DaseClient::get(html_entity_decode($url),$dase_user,$dase_pass);
+	$data = $res[1];
+	$headers = $res[0];
+	//////////////////////////////////////////////////
+
+	//drupal_set_message('<pre>'.htmlspecialchars(print_r($result, TRUE), ENT_QUOTES).'</pre>');
+	if ($headers['http_code'] != 200) {
+		return FALSE;
+	}
+
+	// Check for blacklisted image.
+	// is there a case where Content-Length might be incorrect?
+	//$filesize = strlen($result->data);
+	$filesize = $headers['download_content_length'];
+	if (isset($blacklist[$filesize]) && md5($data) == $blacklist[$filesize]) {
+		return FALSE;
+	}
+
+	// Build the filename.
+	$mime_type = $headers['content_type'];
+	$filename = _feedapi_mapper_imagefield_get_filename($filename_option, $url, $mime_type);
+	if (!$filename) {
+		return FALSE;
+	}
+
+	// Write to temporary file. If a file with the specified name already exists, an alternative will be used.
+	$tmpfile = file_create_filename($filename, file_directory_temp());
+	$fp = fopen($tmpfile, 'w');
+	if (!$fp) {
+		return FALSE;
+	}
+	$file = FALSE;
+	if (fwrite($fp, $data)
+		&& fclose($fp)) {
+			// detokenize & transliterate path by filefield_widget
+			// doesn't work with http://drupal.org/project/filefield_paths
+			$feedapi_node_user = $user;
+			//drupal_set_message('<pre>'.htmlspecialchars(print_r($node->feedapi_node->feed_nids, TRUE), ENT_QUOTES).'</pre>');
+			if ($node->feedapi_node->feed_nids) {
+				// use feedapi_node's user to replace tokens
+				$feed_nids = array_keys($node->feedapi_node->feed_nids);
+				$feed_node = node_load($feed_nids[0]); // use the first one
+				$feedapi_node_user = ($users[$feed_node->uid] ? $users[$feed_node->uid] : user_load($feed_node->uid));
+				$users[$feed_node->uid] = $feedapi_node_user; // cache
+			}
+			$file_path = filefield_widget_file_path($field, $feedapi_node_user);
+
+			// make sure path exists and writable
+			if (file_check_directory($file_path, FILE_CREATE_DIRECTORY)
+				|| (mkdir($file_path, 0775, true) // recursive 
+					&& file_check_directory($file_path))) { // & check again
+						// save file
+						//drupal_set_message('<pre>'.htmlspecialchars(print_r(array('field_file_save_file: ', $filename, $tmpfile, $file_path), TRUE), ENT_QUOTES).'</pre>');
+						$file = field_file_save_file($tmpfile, array(), $file_path);
+						if ($file) {
+							watchdog('feedapi_mapper', 'Saved feed image as %name from %url', array('%name' => $file['filepath'], '%url' => $url), WATCHDOG_INFO);
+						}
+					}
+		}
+
+	// delete the temporary file
+	@unlink($tmpfile);
+
+	return $file;
+}
+
+/**
+ * Get local filename from image URL.
+ *
+ * @param $filename_option
+ *   The selected filename generation option.
+ * @param $url
+ *   The feed URL.
+ * @param &$mime_type
+ *   The MIME type of the downloaded image.
+ * @return
+ *   The local filename or FALSE if the file was no image.
+ */
+function _feedapi_mapper_imagefield_get_filename($filename_option, $url, &$mime_type) {
+	// Figure out the proper file extension from the MIME type.
+	static $types = array(
+		'image/gif' => 'gif',
+		'image/jpeg' => 'jpg',
+		'image/png' => 'png',
+		'image/psd' => 'psd',
+		'image/bmp' => 'bmp',
+		'image/tiff' => 'tif',
+		'image/jp2' => 'jp2',
+		'image/iff' => 'iff',
+		'image/vnd.wap.wbmp' => 'wbmp',
+		'image/xbm' => 'xbm',
+		'image/vnd.microsoft.icon' => 'ico',
+	);
+	if (!isset($types[$mime_type])) {
+		return FALSE;
+	}
+
+	$ext = $types[$mime_type];
+
+	// Create filename.
+	switch ($filename_option) {
+	case 'original':
+		$components = parse_url($url);
+		$filename = basename(urldecode($components['path']));
+		if (!empty($filename)) {
+			if (module_exists('transliteration')) {
+				$filename = transliteration_get($filename);
+			}
+			if (strrchr($filename, '.') != '.'.$ext) {
+				$filename .= '.'.$ext;
+			}
+			$munged = file_munge_filename($filename, implode(' ', array_values($types)));
+			//drupal_set_message('<pre>'.htmlspecialchars(print_r(array($filename, $munged), TRUE), ENT_QUOTES).'</pre>');
+			return $munged;
+		}
+		// falls through; can this occur?
+
+	case 'md5':
+		return file_munge_filename(md5($url) .'.'. $ext, implode(' ', array_values($types)));
+	}
+}
+
+
+
+
+
+
+function daseclient_form_alter(&$form, $form_state, $form_id){
+	if (isset($form['#node']) && strtolower(variable_get('daseclient_content_type_name','')).'_node_form' == $form_id) {
+		//disable drupal save.
+		if(variable_get('daseclient_content_type_save','')){
+			unset($form['buttons']['submit']);
+		}
+		$form['buttons']['dase_upload'] = array('#type' => 'submit', '#value' => t('Upload To Dase'),'#weight' => 20,'#submit' => array('start_dase_upload'));
+	}
+	else if($form['#token'] == 'daseclient_search_form'){
+			unset($form['buttons']['submit']);
+			unset($form['buttons']['reset']);
+
+	}
+
+}
+
+function daseclient_node_type_submit($form,&$form_state){
+	$type = $form['#node_type']->type;
+	if($type){
+		variable_set('daseclient_settings_'. $type, $form_state['values']['daseclient']);
+	}
+}
+
+
+function start_dase_upload($form,$form_values){
+
+	// DASE SETUP
+	$DASE_COLLECTION = variable_get('daseclient_collection_ascii_id','');
+	$DASE_URL = preg_replace('{/$}', '', variable_get('daseclient_url',''));
+	$DASE_USER = variable_get('daseclient_user',''); 
+	$DASE_PASS = variable_get('daseclient_pass','');
+	$fields = variable_get('daseclient_content_type_fields','');
+	$content_type = variable_get('daseclient_content_type_name','');
+	$msg = variable_get('daseclient_success_message','');
+
+	if($fields != '' && $content_type != ''){
+		$client = new DaseClient($DASE_COLLECTION,'php',$DASE_URL);
+		$client->setAuth($DASE_USER,$DASE_PASS);
+		foreach($fields as $key => $val){
+			if(strpos($key,'field_') !== false){
+				$field = content_fields($key,$content_type);
+				//if its a location type we need to do something special to get the values
+				if($field['type'] == 'location'){
+					$latitude = $form_values['values'][$key][0]['locpick']['user_latitude'];
+					$longitude = $form_values['values'][$key][0]['locpick']['user_longitude'];
+					if($latitude && $longitude){
+						$meta['latitude'] = $latitude;
+						$meta['longitude'] = $longitude;
+					}
+					$meta['country'] = $form_values['values'][$key][0]['country'];
+					$meta['city'] = $form_values['values'][$key][0]['city'];
+					$meta['location_name'] = $form_values['values'][$key][0]['name'];
+
+				}
+				else if($field['type'] == 'filefield' && $field['widget']['type'] == 'imagefield_widget'){
+					$fp = $form_values['values'][$key][0]['filepath'];
+				}
+				else if($field['type'] == 'text'){
+					$meta[strtolower(str_replace(' ','_',$field['widget']['label']))] = $form_values['values'][$key][0]['value'];
+				}
+			}
+			else{
+				$meta[$key] = $form_values['values'][$key];
+			}
+		}
+
+		if(is_file($fp)){	
+			$res = $client->postFileToCollection($fp,$meta);
+			unlink($fp);
+
+			if($res[0]['http_code'] == '401'){
+				drupal_set_message('Unauthorized. Please set your username and password in the Dase configuration','error');
+			}
+			else if(stripos($res[1],'Duplicate') !== false){
+				drupal_set_message($res[1],'status');
+			}
+			else if($res[0]['http_code'] == 200){
+				if($msg == ''){
+					drupal_set_message('Upload Successful','status');
+				}
+				else{
+					drupal_set_message(t($msg),'status');
+				}
+			}
+			else{
+				drupal_set_message(t($res[1]),'status');
+			}
+		}
+		else{
+			drupal_set_message('You either need to upload an image or something went horrible wrong ','error');
+		}
+	}
+	else{
+		drupal_set_message('Please select atleast one field to upload in the Dase configuration','error');
+	}
+
+}
+
+function daseclient_feedapi_feed($op){
+	$args = func_get_args();
+	switch ($op){
+	case 'type':
+		return array('XML feed');
+	case 'compataible':
+		return TRUE;
+	case 'parse':
+		$feed = $args[1];
+		if(is_object($feed)){
+			if(isset($feed->items)){
+				foreach($feed->items as $i => $item){
+					//get image information
+					foreach($feed->items[$i]->options->enclosures['image']['jpeg'] as $n => $img){
+						if($img->categories[0]->term != ''){
+							$type = $img->categories[0]->term;
+							$feed->items[$i]->options->image->$type = $img->link;
+						}
+					}
+					//get metadata
+					foreach($feed->items[$i]->options->raw['child']['http://www.w3.org/2005/Atom']['category'] as $n => $cat){
+						foreach($cat['attribs'] as $c){
+							if($c['scheme'] == 'http://daseproject.org/category/metadata'){
+								$feed->items[$i]->options->metadata->$c['term'] = array($cat['data']);
+							}
+						}
+					}
+					//get rid of domain cluter
+					$feed->items[$i]->options->domains = null;
+				}						
+			}
+			else{
+				drupal_set_message(t('Use this as a secondary parser!!'), 'error');
+			}
+		}
+		break;
+	}
+}

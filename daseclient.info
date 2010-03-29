@@ -1,0 +1,11 @@
+; $Id$
+name = DaseClient
+description = Parser for Dase Feeds, Unique mapping of images using DaseClient::get, Form alter hook to Upload an image to Dase. 
+core = 6.x
+;dependencies[] = feedapi
+;dependencies[] = feedapi_mapper
+dependencies[] = imageapi
+dependencies[] = content
+dependencies[] = imagefield
+
+; blah
